@@ -242,18 +242,60 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 		return fmt.Errorf("failed to get class schema: %w", err)
 	}
 
+	// Build property filter set for fast lookup
+	includePropsSet := make(map[string]bool)
+	if len(r.Weaviate.IncludeProperties) > 0 {
+		for _, prop := range r.Weaviate.IncludeProperties {
+			includePropsSet[prop] = true
+		}
+	}
+
 	var fields []graphql.Field
 	for _, prop := range classSchema.Properties {
-		fields = append(fields, graphql.Field{Name: prop.Name})
+		// If IncludeProperties is specified, only fetch those properties
+		if len(r.Weaviate.IncludeProperties) > 0 {
+			if includePropsSet[prop.Name] {
+				fields = append(fields, graphql.Field{Name: prop.Name})
+			}
+		} else {
+			// Otherwise, fetch all properties (default behavior)
+			fields = append(fields, graphql.Field{Name: prop.Name})
+		}
+	}
+
+	// Build _additional field based on whether we're using named vectors
+	additionalFields := []graphql.Field{
+		{Name: "id"},
+	}
+	if r.Weaviate.VectorName != "" {
+		// For named vectors, request: _additional { id vectors { <name> } }
+		additionalFields = append(additionalFields, graphql.Field{
+			Name: "vectors",
+			Fields: []graphql.Field{
+				{Name: r.Weaviate.VectorName},
+			},
+		})
+	} else {
+		// For default vector, request: _additional { id vector }
+		additionalFields = append(additionalFields, graphql.Field{Name: "vector"})
 	}
 
 	fields = append(fields, graphql.Field{
-		Name: "_additional",
-		Fields: []graphql.Field{
-			{Name: "id"},
-			{Name: "vector"},
-		},
+		Name:   "_additional",
+		Fields: additionalFields,
 	})
+
+	// Log which properties and vectors are being migrated
+	if len(r.Weaviate.IncludeProperties) > 0 {
+		pterm.Info.Printfln("Migrating only selected properties: %v", r.Weaviate.IncludeProperties)
+	} else {
+		pterm.Info.Printfln("Migrating all properties from Weaviate class")
+	}
+	if r.Weaviate.VectorName != "" {
+		pterm.Info.Printfln("Using named vector: %s", r.Weaviate.VectorName)
+	} else {
+		pterm.Info.Printfln("Using default vector")
+	}
 
 	bar, _ := pterm.DefaultProgressbar.WithTotal(int(sourcePointCount)).Start()
 	displayMigrationProgress(bar, offsetCount)
@@ -311,9 +353,25 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 				return errors.New("missing id field")
 			}
 
-			rawVector, ok := additional["vector"].([]any)
-			if !ok {
-				return errors.New("missing vector field")
+			// Extract vector based on whether we're using named vectors
+			var rawVector []any
+			if r.Weaviate.VectorName != "" {
+				// Named vector: additional["vectors"]["<name>"]
+				vectors, ok := additional["vectors"].(map[string]any)
+				if !ok {
+					return fmt.Errorf("missing vectors field for named vector '%s'", r.Weaviate.VectorName)
+				}
+				rawVector, ok = vectors[r.Weaviate.VectorName].([]any)
+				if !ok {
+					return fmt.Errorf("missing named vector '%s'", r.Weaviate.VectorName)
+				}
+			} else {
+				// Default vector: additional["vector"]
+				var ok bool
+				rawVector, ok = additional["vector"].([]any)
+				if !ok {
+					return errors.New("missing vector field")
+				}
 			}
 
 			vector := make([]float32, len(rawVector))
@@ -327,7 +385,16 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 
 			cleanObj := make(map[string]any)
 			for k, v := range objMap {
-				if k != "_additional" {
+				if k == "_additional" {
+					continue
+				}
+				// If IncludeProperties is specified, only include those properties
+				if len(r.Weaviate.IncludeProperties) > 0 {
+					if includePropsSet[k] {
+						cleanObj[k] = v
+					}
+				} else {
+					// Otherwise, include all properties (default behavior)
 					cleanObj[k] = v
 				}
 			}
