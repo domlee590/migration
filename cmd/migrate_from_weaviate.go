@@ -242,9 +242,25 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 		return fmt.Errorf("failed to get class schema: %w", err)
 	}
 
+	// Build property filter set for fast lookup
+	includePropsSet := make(map[string]bool)
+	if len(r.Weaviate.IncludeProperties) > 0 {
+		for _, prop := range r.Weaviate.IncludeProperties {
+			includePropsSet[prop] = true
+		}
+	}
+
 	var fields []graphql.Field
 	for _, prop := range classSchema.Properties {
-		fields = append(fields, graphql.Field{Name: prop.Name})
+		// If IncludeProperties is specified, only fetch those properties
+		if len(r.Weaviate.IncludeProperties) > 0 {
+			if includePropsSet[prop.Name] {
+				fields = append(fields, graphql.Field{Name: prop.Name})
+			}
+		} else {
+			// Otherwise, fetch all properties (default behavior)
+			fields = append(fields, graphql.Field{Name: prop.Name})
+		}
 	}
 
 	fields = append(fields, graphql.Field{
@@ -254,6 +270,13 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			{Name: "vector"},
 		},
 	})
+
+	// Log which properties are being migrated
+	if len(r.Weaviate.IncludeProperties) > 0 {
+		pterm.Info.Printfln("Migrating only selected properties: %v", r.Weaviate.IncludeProperties)
+	} else {
+		pterm.Info.Printfln("Migrating all properties from Weaviate class")
+	}
 
 	bar, _ := pterm.DefaultProgressbar.WithTotal(int(sourcePointCount)).Start()
 	displayMigrationProgress(bar, offsetCount)
@@ -327,7 +350,16 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 
 			cleanObj := make(map[string]any)
 			for k, v := range objMap {
-				if k != "_additional" {
+				if k == "_additional" {
+					continue
+				}
+				// If IncludeProperties is specified, only include those properties
+				if len(r.Weaviate.IncludeProperties) > 0 {
+					if includePropsSet[k] {
+						cleanObj[k] = v
+					}
+				} else {
+					// Otherwise, include all properties (default behavior)
 					cleanObj[k] = v
 				}
 			}
