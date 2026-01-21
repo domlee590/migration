@@ -2,6 +2,8 @@
 
 CLI tool for migrating data to [Qdrant](http://qdrant.tech) with support for resumable transfers in case of interruptions.
 
+> **Enhanced Fork:** This version adds **property filtering** support for Weaviate migrations, enabling lean payload storage for large-scale RAG systems. See [LEAN_PAYLOAD_GUIDE.md](LEAN_PAYLOAD_GUIDE.md) for details.
+
 ## Supported Sources
 
 * Chroma
@@ -30,6 +32,32 @@ docker pull registry.cloud.qdrant.io/library/qdrant-migration
 ```
 
 ## How To Migrate?
+
+### Quick Start
+
+**For Weaviate → Qdrant with lean payloads**, see the step-by-step [QUICK_START.md](QUICK_START.md) guide.
+
+**For other sources**, expand the relevant section below for examples and configuration options.
+
+### Building the Tool
+
+If you're using this fork with lean payload support:
+
+```bash
+# Build local binary (faster, recommended)
+./build-local.sh
+
+# Or build Docker image
+./build-docker.sh
+```
+
+For the official upstream tool, use the published Docker image:
+
+```bash
+docker pull registry.cloud.qdrant.io/library/qdrant-migration
+```
+
+### Migration Sources
 
 > Click each to expand
 
@@ -182,9 +210,11 @@ Migrate data from a **Weaviate** database to **Qdrant**:
 ### 📥 Example
 
 > Important ⚠️:
- > Weaviate [does not expose](https://forum.weaviate.io/t/get-vector-dimension-of-a-collection/1769/) vector dimensions and distance metric after a collection is created.
- > Therefore, you must [manually create](https://qdrant.tech/documentation/concepts/collections/#create-a-collection) a Qdrant collection before starting the migration.
- > Ensure that the **vector dimensions in Qdrant exactly match** those used in Weaviate.
+> Weaviate [does not expose](https://forum.weaviate.io/t/get-vector-dimension-of-a-collection/1769/) vector dimensions and distance metric after a collection is created.
+> Therefore, you must [manually create](https://qdrant.tech/documentation/concepts/collections/#create-a-collection) a Qdrant collection before starting the migration.
+> Ensure that the **vector dimensions in Qdrant exactly match** those used in Weaviate.
+
+#### Full Migration (All Properties)
 
 ```bash
 docker run --net=host --rm -it registry.cloud.qdrant.io/library/qdrant-migration weaviate \
@@ -197,6 +227,30 @@ docker run --net=host --rm -it registry.cloud.qdrant.io/library/qdrant-migration
     --qdrant.collection 'target-collection' \
     --migration.batch-size 64
 ```
+
+#### Lean Payload Migration (Recommended for Large RAG Systems)
+
+For large-scale RAG systems (100M+ points), you can reduce Qdrant storage by ~70% by migrating only filter fields to Qdrant, while keeping full text in an external database (DynamoDB, Supabase, etc.):
+
+```bash
+docker run --net=host --rm -it registry.cloud.qdrant.io/library/qdrant-migration weaviate \
+    --weaviate.host 'example.c0.asia-southeast1.gcp.weaviate.cloud' \
+    --weaviate.scheme 'https' \
+    --weaviate.auth-type 'apiKey' \
+    --weaviate.api-key 'optional-api-key' \
+    --weaviate.class-name 'ExampleClass' \
+    --weaviate.include-properties 'doc_id,data_source_id' \
+    --qdrant.url 'http://localhost:6334' \
+    --qdrant.collection 'target-collection' \
+    --migration.batch-size 64
+```
+
+**Benefits:**
+- Reduces Qdrant disk usage from ~2TB to ~400-500GB per replica (for 350M points)
+- Point size drops from ~2-3KB to ~1.1KB (with quantization)
+- Full text retrieved from external DB after vector search (+5-15ms latency)
+
+See [LEAN_PAYLOAD_GUIDE.md](LEAN_PAYLOAD_GUIDE.md) for detailed setup and [QUICK_START.md](QUICK_START.md) for a step-by-step walkthrough.
 
 #### Weaviate Options
 
@@ -215,6 +269,7 @@ docker run --net=host --rm -it registry.cloud.qdrant.io/library/qdrant-migration
 | `--weaviate.refresh-token` | Refresh token for authentication (when `auth-type` is `bearer`)                                  |
 | `--weaviate.expires-in`    | Access token expiration time in seconds (when `auth-type` is `bearer`)                           |
 | `--weaviate.tenant`        | Objects belonging to which tenant to migrate                                                     |
+| `--weaviate.include-properties` | Comma-separated list of properties to include in Qdrant payload. If empty, all properties are migrated. **Use for lean payload migrations** (see [LEAN_PAYLOAD_GUIDE.md](LEAN_PAYLOAD_GUIDE.md)) |
 
 #### Qdrant Options
 
