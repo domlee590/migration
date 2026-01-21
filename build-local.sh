@@ -20,7 +20,13 @@ fi
 
 echo "Using Go at: $GO_BIN"
 
+# Update dependencies and checksums
+echo "Updating dependencies..."
+$GO_BIN mod download
+$GO_BIN mod tidy
+
 # Build the binary locally
+echo "Building binary..."
 CGO_ENABLED=1 $GO_BIN build -ldflags "-X 'main.projectVersion=custom' -X 'main.projectBuild=lean-payload'" -o bin/qdrant-migration main.go
 
 echo "✅ Build complete! Binary: ./bin/qdrant-migration"
