@@ -60,6 +60,7 @@ type WeaviateConfig struct {
 	ExpiresIn         uint     `help:"Access token expiration time (when AuthType is 'bearer')"`
 	Tenant            string   `help:"Objects belonging to which tenant to migrate"`
 	IncludeProperties []string `help:"Only include these properties in Qdrant payload (comma-separated). If empty, all properties are included."`
+	VectorName        string   `help:"Name of the named vector to migrate (for Weaviate classes with named vectors). If empty, uses default vector."`
 }
 
 type RedisConfig struct {
