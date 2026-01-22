@@ -168,7 +168,17 @@ func (r *MigrateFromWeaviateCmd) connectToWeaviate() (*weaviate.Client, error) {
 }
 
 func (r *MigrateFromWeaviateCmd) getClassSchema(ctx context.Context, client *weaviate.Client) (*models.Class, error) {
-	schema, err := client.Schema().Getter().Do(ctx)
+	var schema models.Schema
+	err := commons.RetryWeaviateOperation("get Weaviate schema", func() error {
+		schemaResult, innerErr := client.Schema().Getter().Do(ctx)
+		if innerErr != nil {
+			return innerErr
+		}
+		if schemaResult != nil {
+			schema = schemaResult.Schema
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schema: %w", err)
 	}
@@ -183,15 +193,20 @@ func (r *MigrateFromWeaviateCmd) getClassSchema(ctx context.Context, client *wea
 }
 
 func (r *MigrateFromWeaviateCmd) countWeaviateObjects(ctx context.Context, client *weaviate.Client) (uint64, error) {
-	result, err := client.GraphQL().Aggregate().
-		WithClassName(r.Weaviate.ClassName).
-		WithFields(graphql.Field{
-			Name: "meta",
-			Fields: []graphql.Field{
-				{Name: "count"},
-			},
-		}).
-		Do(ctx)
+	var result *models.GraphQLResponse
+	err := commons.RetryWeaviateOperation("count Weaviate objects", func() error {
+		var innerErr error
+		result, innerErr = client.GraphQL().Aggregate().
+			WithClassName(r.Weaviate.ClassName).
+			WithFields(graphql.Field{
+				Name: "meta",
+				Fields: []graphql.Field{
+					{Name: "count"},
+				},
+			}).
+			Do(ctx)
+		return innerErr
+	})
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to count objects in Weaviate: %w", err)
@@ -311,7 +326,12 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			query = query.WithAfter(offsetID.GetUuid())
 		}
 
-		result, err := query.Do(ctx)
+		var result *models.GraphQLResponse
+		err := commons.RetryWeaviateOperation("fetch batch from Weaviate", func() error {
+			var innerErr error
+			result, innerErr = query.Do(ctx)
+			return innerErr
+		})
 		if err != nil {
 			return fmt.Errorf("failed to get objects from Weaviate: %w", err)
 		}
