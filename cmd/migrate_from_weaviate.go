@@ -317,9 +317,6 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 	bar, _ := pterm.DefaultProgressbar.WithTotal(int(sourcePointCount)).Start()
 	displayMigrationProgress(bar, offsetCount)
 
-	var skippedCount uint64
-	var lastWeaviateID *qdrant.PointId
-
 	for {
 		query := sourceClient.GraphQL().Get().
 			WithClassName(r.Weaviate.ClassName).
@@ -327,8 +324,8 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			WithFields(fields...).
 			WithTenant(r.Weaviate.Tenant)
 
-		if lastWeaviateID != nil {
-			query = query.WithAfter(lastWeaviateID.GetUuid())
+		if offsetID != nil {
+			query = query.WithAfter(offsetID.GetUuid())
 		}
 
 		var result *models.GraphQLResponse
@@ -368,30 +365,18 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 				return errors.New("invalid object format")
 			}
 
-			// Always get the Weaviate ID for pagination
-			additional, ok := objMap["_additional"].(map[string]any)
-			if !ok {
-				return errors.New("missing _additional field")
-			}
-
-			weaviateID, ok := additional["id"].(string)
-			if !ok {
-				return errors.New("missing Weaviate id field")
-			}
-			lastWeaviateID = qdrant.NewID(weaviateID)
-
-			// Get chunk_id - skip if missing or invalid
 			chunkIDValue, ok := objMap[chunkIDField]
 			if !ok {
-				pterm.Warning.Printfln("Skipping object %s: missing %s field", weaviateID, chunkIDField)
-				skippedCount++
-				continue
+				return fmt.Errorf("missing %s field", chunkIDField)
 			}
 			chunkID, ok := chunkIDValue.(string)
 			if !ok || chunkID == "" {
-				pterm.Warning.Printfln("Skipping object %s: invalid %s field", weaviateID, chunkIDField)
-				skippedCount++
-				continue
+				return fmt.Errorf("invalid %s field", chunkIDField)
+			}
+
+			additional, ok := objMap["_additional"].(map[string]any)
+			if !ok {
+				return errors.New("missing _additional field")
 			}
 
 			// Extract vector based on whether we're using named vectors
@@ -400,41 +385,28 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 				// Named vector: additional["vectors"]["<name>"]
 				vectors, ok := additional["vectors"].(map[string]any)
 				if !ok {
-					pterm.Warning.Printfln("Skipping object %s: missing vectors field for named vector '%s'", weaviateID, r.Weaviate.VectorName)
-					skippedCount++
-					continue
+					return fmt.Errorf("missing vectors field for named vector '%s'", r.Weaviate.VectorName)
 				}
 				rawVector, ok = vectors[r.Weaviate.VectorName].([]any)
 				if !ok {
-					pterm.Warning.Printfln("Skipping object %s: missing named vector '%s'", weaviateID, r.Weaviate.VectorName)
-					skippedCount++
-					continue
+					return fmt.Errorf("missing named vector '%s'", r.Weaviate.VectorName)
 				}
 			} else {
 				// Default vector: additional["vector"]
 				var ok bool
 				rawVector, ok = additional["vector"].([]any)
 				if !ok {
-					pterm.Warning.Printfln("Skipping object %s: missing vector field", weaviateID)
-					skippedCount++
-					continue
+					return errors.New("missing vector field")
 				}
 			}
 
 			vector := make([]float32, len(rawVector))
-			vectorValid := true
 			for i, val := range rawVector {
 				if f, ok := val.(float64); ok {
 					vector[i] = float32(f)
 				} else {
-					pterm.Warning.Printfln("Skipping object %s: invalid vector format at index %d", weaviateID, i)
-					skippedCount++
-					vectorValid = false
-					break
+					return errors.New("invalid vector format")
 				}
-			}
-			if !vectorValid {
-				continue
 			}
 
 			cleanObj := make(map[string]any)
@@ -454,9 +426,7 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			}
 			payload, err := qdrant.TryValueMap(cleanObj)
 			if err != nil {
-				pterm.Warning.Printfln("Skipping object %s (chunk_id: %s): failed to convert payload: %v", weaviateID, chunkID, err)
-				skippedCount++
-				continue
+				return fmt.Errorf("failed to convert object to Qdrant payload: %w", err)
 			}
 
 			point := &qdrant.PointStruct{
@@ -466,28 +436,20 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			}
 
 			targetPoints = append(targetPoints, point)
+			offsetID = point.Id
 		}
 
-		// Only upsert if we have valid points
-		if len(targetPoints) > 0 {
-			_, err = targetClient.Upsert(ctx, &qdrant.UpsertPoints{
-				CollectionName: r.Qdrant.Collection,
-				Points:         targetPoints,
-				Wait:           qdrant.PtrOf(true),
-			})
-			if err != nil {
-				return fmt.Errorf("failed to insert data into target: %w", err)
-			}
-
-			// Use the last valid point ID for offset tracking
-			offsetID = targetPoints[len(targetPoints)-1].Id
+		_, err = targetClient.Upsert(ctx, &qdrant.UpsertPoints{
+			CollectionName: r.Qdrant.Collection,
+			Points:         targetPoints,
+			Wait:           qdrant.PtrOf(true),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to insert data into target: %w", err)
 		}
 
-		// Update offset count with total objects processed (including skipped)
 		offsetCount += uint64(count)
-		
-		// Store offset using the last Weaviate ID for pagination continuity
-		err = commons.StoreStartOffset(ctx, r.Migration.OffsetsCollection, targetClient, r.Weaviate.ClassName, lastWeaviateID, offsetCount)
+		err = commons.StoreStartOffset(ctx, r.Migration.OffsetsCollection, targetClient, r.Weaviate.ClassName, offsetID, offsetCount)
 		if err != nil {
 			return fmt.Errorf("failed to store offset: %w", err)
 		}
@@ -495,10 +457,6 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 		bar.Add(count)
 	}
 
-	if skippedCount > 0 {
-		pterm.Warning.Printfln("Migration completed with %d objects skipped (missing or invalid chunk_id)", skippedCount)
-	}
 	pterm.Success.Printfln("Data migration finished successfully")
-	pterm.Info.Printfln("Migrated: %d objects, Skipped: %d objects", sourcePointCount-skippedCount, skippedCount)
 	return nil
 }
