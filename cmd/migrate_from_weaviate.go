@@ -358,6 +358,8 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 		}
 
 		targetPoints := make([]*qdrant.PointStruct, 0, count)
+		var lastWeaviateID string
+		skippedCount := 0
 
 		for _, obj := range objects {
 			objMap, ok := obj.(map[string]any)
@@ -365,18 +367,28 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 				return errors.New("invalid object format")
 			}
 
-			chunkIDValue, ok := objMap[chunkIDField]
-			if !ok {
-				return fmt.Errorf("missing %s field", chunkIDField)
-			}
-			chunkID, ok := chunkIDValue.(string)
-			if !ok || chunkID == "" {
-				return fmt.Errorf("invalid %s field", chunkIDField)
-			}
-
 			additional, ok := objMap["_additional"].(map[string]any)
 			if !ok {
 				return errors.New("missing _additional field")
+			}
+
+			weaviateID, ok := additional["id"].(string)
+			if !ok || weaviateID == "" {
+				return errors.New("missing id field")
+			}
+			lastWeaviateID = weaviateID
+
+			chunkIDValue, ok := objMap[chunkIDField]
+			if !ok {
+				pterm.Warning.Printfln("Skipping object without %s (weaviate id: %s)", chunkIDField, weaviateID)
+				skippedCount++
+				continue
+			}
+			chunkID, ok := chunkIDValue.(string)
+			if !ok || chunkID == "" {
+				pterm.Warning.Printfln("Skipping object with invalid %s (weaviate id: %s)", chunkIDField, weaviateID)
+				skippedCount++
+				continue
 			}
 
 			// Extract vector based on whether we're using named vectors
@@ -436,16 +448,26 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			}
 
 			targetPoints = append(targetPoints, point)
-			offsetID = point.Id
 		}
 
-		_, err = targetClient.Upsert(ctx, &qdrant.UpsertPoints{
-			CollectionName: r.Qdrant.Collection,
-			Points:         targetPoints,
-			Wait:           qdrant.PtrOf(true),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to insert data into target: %w", err)
+		if lastWeaviateID == "" {
+			return errors.New("missing weaviate ids in batch")
+		}
+		offsetID = qdrant.NewID(lastWeaviateID)
+
+		if skippedCount > 0 {
+			pterm.Warning.Printfln("Skipped %d objects missing valid %s", skippedCount, chunkIDField)
+		}
+
+		if len(targetPoints) > 0 {
+			_, err = targetClient.Upsert(ctx, &qdrant.UpsertPoints{
+				CollectionName: r.Qdrant.Collection,
+				Points:         targetPoints,
+				Wait:           qdrant.PtrOf(true),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to insert data into target: %w", err)
+			}
 		}
 
 		offsetCount += uint64(count)
