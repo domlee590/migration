@@ -265,11 +265,13 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 		}
 	}
 
+	chunkIDField := "chunk_id"
+
 	var fields []graphql.Field
 	for _, prop := range classSchema.Properties {
 		// If IncludeProperties is specified, only fetch those properties
 		if len(r.Weaviate.IncludeProperties) > 0 {
-			if includePropsSet[prop.Name] {
+			if includePropsSet[prop.Name] || prop.Name == chunkIDField {
 				fields = append(fields, graphql.Field{Name: prop.Name})
 			}
 		} else {
@@ -363,14 +365,18 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 				return errors.New("invalid object format")
 			}
 
+			chunkIDValue, ok := objMap[chunkIDField]
+			if !ok {
+				return fmt.Errorf("missing %s field", chunkIDField)
+			}
+			chunkID, ok := chunkIDValue.(string)
+			if !ok || chunkID == "" {
+				return fmt.Errorf("invalid %s field", chunkIDField)
+			}
+
 			additional, ok := objMap["_additional"].(map[string]any)
 			if !ok {
 				return errors.New("missing _additional field")
-			}
-
-			id, ok := additional["id"].(string)
-			if !ok {
-				return errors.New("missing id field")
 			}
 
 			// Extract vector based on whether we're using named vectors
@@ -424,7 +430,7 @@ func (r *MigrateFromWeaviateCmd) migrateData(ctx context.Context, sourceClient *
 			}
 
 			point := &qdrant.PointStruct{
-				Id:      qdrant.NewID(id),
+				Id:      qdrant.NewID(chunkID),
 				Vectors: qdrant.NewVectors(vector...),
 				Payload: payload,
 			}
