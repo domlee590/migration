@@ -1,4 +1,12 @@
 # Dependencies for migration recovery scripts
-weaviate-client>=4.0.0
-qdrant-client>=1.7.0
-python-dotenv>=1.0.0
+# Used by fix_qdrant_duplicates.py and other recovery scripts
+
+# Database clients
+boto3>=1.35.0  # AWS DynamoDB
+supabase>=2.0.0  # Supabase client
+weaviate-client>=4.0.0  # Weaviate vector database
+qdrant-client>=1.7.0  # Qdrant vector database (includes AsyncQdrantClient)
+
+# Utilities
+python-dotenv>=1.0.0  # Environment variable management
+tqdm>=4.66.0  # Progress bars
