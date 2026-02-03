@@ -64,7 +64,7 @@ class QdrantRecoveryManager:
 
         # DynamoDB
         self.aws_region = os.getenv("AWS_REGION", "us-east-1")
-        self.ddb_table_name = "chunks-dev"
+        self.ddb_table_name = "chunks"
 
         # Weaviate
         self.weaviate_url = os.getenv("WEAVIATE_URL")
