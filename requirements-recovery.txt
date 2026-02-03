@@ -10,3 +10,4 @@ qdrant-client>=1.7.0  # Qdrant vector database (includes AsyncQdrantClient)
 # Utilities
 python-dotenv>=1.0.0  # Environment variable management
 tqdm>=4.66.0  # Progress bars
+tenacity>=9.0.0  # Retry logic with exponential backoff

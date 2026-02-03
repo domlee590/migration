@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from tqdm import tqdm
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
 
 # AWS/Database clients
 import boto3
@@ -27,6 +34,7 @@ import weaviate
 from weaviate.classes.query import Filter
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointStruct
+from botocore.exceptions import ClientError
 
 # Configuration
 CHECKPOINT_FILE = Path(__file__).parent / "qdrant_recovery_checkpoint.json"
@@ -157,6 +165,22 @@ class QdrantRecoveryManager:
         except Exception as e:
             logger.error(f"Failed to save checkpoint: {e}")
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _query_supabase_page(self, offset: int, page_size: int):
+        """Query a single page from Supabase with retry logic."""
+        return (
+            self.supabase.table("documents")
+            .select("id,data_source_id,hash,doc_name,created_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+
     def get_duplicate_documents(self) -> List[Dict]:
         """Query Supabase for all documents with duplicate hashes."""
         logger.info("Querying Supabase for documents with duplicate hashes...")
@@ -167,12 +191,7 @@ class QdrantRecoveryManager:
         offset = 0
 
         while True:
-            response = (
-                self.supabase.table("documents")
-                .select("id,data_source_id,hash,doc_name,created_at")
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
+            response = self._query_supabase_page(offset, page_size)
 
             if not response.data:
                 break
@@ -226,8 +245,19 @@ class QdrantRecoveryManager:
                 parsed[key] = value_obj
         return parsed
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((ClientError, Exception)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _query_dynamodb_page(self, query_params: Dict) -> Dict:
+        """Query a single page from DynamoDB with retry logic."""
+        return self.dynamodb.query(**query_params)
+
     def get_chunks_from_dynamodb(self, doc_id: str) -> List[Dict]:
-        """Query DynamoDB chunks-dev table with pagination.
+        """Query DynamoDB chunks-dev table with pagination and retry logic.
 
         Returns: List of parsed chunk dicts with plain values.
         """
@@ -245,7 +275,7 @@ class QdrantRecoveryManager:
                 query_params["ExclusiveStartKey"] = last_key
 
             try:
-                response = self.dynamodb.query(**query_params)
+                response = self._query_dynamodb_page(query_params)
 
                 # Parse items
                 for item in response.get("Items", []):
@@ -261,8 +291,24 @@ class QdrantRecoveryManager:
 
         return chunks
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _query_weaviate_page(self, collection, doc_id: str, limit: int, offset: int):
+        """Query a single page from Weaviate with retry logic."""
+        return collection.query.fetch_objects(
+            filters=Filter.by_property("doc_id").equal(doc_id),
+            limit=limit,
+            offset=offset,
+            include_vector=True,
+        )
+
     def get_chunks_from_weaviate(self, doc_id: str) -> List[Any]:
-        """Query Weaviate Text_tables collection with pagination.
+        """Query Weaviate Text_tables collection with pagination and retry logic.
 
         Returns: List of Weaviate objects with .properties and .vector
         """
@@ -274,12 +320,7 @@ class QdrantRecoveryManager:
             collection = self.weaviate_client.collections.get(self.weaviate_collection)
 
             while True:
-                response = collection.query.fetch_objects(
-                    filters=Filter.by_property("doc_id").equal(doc_id),
-                    limit=limit,
-                    offset=offset,
-                    include_vector=True,
-                )
+                response = self._query_weaviate_page(collection, doc_id, limit, offset)
 
                 if not response.objects:
                     break
@@ -347,18 +388,33 @@ class QdrantRecoveryManager:
         logger.debug(f"  Matched: {matched_count}, Unmatched: {unmatched_count}")
         return points
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _upsert_batch_with_retry(self, batch: List[PointStruct], batch_num: int):
+        """Upsert a single batch to Qdrant with retry logic."""
+        try:
+            await self.qdrant_client.upsert(
+                collection_name=self.qdrant_collection, points=batch, wait=True
+            )
+            logger.debug(
+                f"Successfully upserted batch {batch_num} ({len(batch)} points)"
+            )
+        except Exception as e:
+            logger.error(f"Failed to upsert batch {batch_num}: {e}")
+            raise
+
     async def upsert_to_qdrant(self, points: List[PointStruct], batch_size: int = 1000):
-        """Upsert points to Qdrant in batches."""
+        """Upsert points to Qdrant in batches with retry logic."""
         total = len(points)
         for i in range(0, total, batch_size):
             batch = points[i : i + batch_size]
-            try:
-                await self.qdrant_client.upsert(
-                    collection_name=self.qdrant_collection, points=batch, wait=True
-                )
-            except Exception as e:
-                logger.error(f"Failed to upsert batch {i//batch_size + 1}: {e}")
-                raise
+            batch_num = i // batch_size + 1
+            await self._upsert_batch_with_retry(batch, batch_num)
 
     async def process_document(self, doc: Dict) -> int:
         """Process a single document and recover its chunks.
