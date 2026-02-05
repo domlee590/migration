@@ -29,13 +29,17 @@ ENV_FILE = Path(__file__).parent / ".env"
 OUTPUT_FILE = Path(__file__).parent / "missing_chunk_ids.json"
 LOG_FILE = Path(__file__).parent / "scan_missing_chunks.log"
 
-# Setup logging
+# Setup logging - only log to file to keep console clean for tqdm
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
+    handlers=[logging.FileHandler(LOG_FILE)],
 )
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP logs from various libraries
+for noisy_logger in ["httpx", "httpcore", "urllib3", "weaviate", "qdrant_client"]:
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 class ChunkScanner:
@@ -79,6 +83,8 @@ class ChunkScanner:
         logger.info("Environment configuration loaded successfully")
         logger.info(f"Weaviate: {self.weaviate_url} / {self.weaviate_collection}")
         logger.info(f"Qdrant: {self.qdrant_url} / {self.qdrant_collection}")
+        print(f"Weaviate: {self.weaviate_url} / {self.weaviate_collection}")
+        print(f"Qdrant: {self.qdrant_url} / {self.qdrant_collection}")
 
     def _scan_weaviate_ids_sync(self) -> Set[str]:
         """Synchronous Weaviate scan - runs in thread executor.
@@ -104,8 +110,8 @@ class ChunkScanner:
 
             collection = client.collections.get(self.weaviate_collection)
 
-            # Progress tracking
-            pbar = tqdm(desc="[Weaviate] Scanning chunk_ids", unit=" chunks")
+            # Progress tracking - position=0 for top bar
+            pbar = tqdm(desc="[Weaviate] Scanning chunk_ids", unit=" chunks", position=0, leave=True)
 
             while True:
                 # Retry logic for transient failures
@@ -154,6 +160,7 @@ class ChunkScanner:
 
         except Exception as e:
             logger.error(f"[Weaviate] Failed to scan: {e}", exc_info=True)
+            tqdm.write(f"[Weaviate] Error: {e}")
             raise
 
     async def scan_weaviate_ids(self) -> Set[str]:
@@ -183,8 +190,8 @@ class ChunkScanner:
                 api_key=self.qdrant_api_key,
             )
 
-            # Progress tracking
-            pbar = tqdm(desc="[Qdrant] Scanning point IDs", unit=" points")
+            # Progress tracking - position=1 for second bar
+            pbar = tqdm(desc="[Qdrant] Scanning point IDs", unit=" points", position=1, leave=True)
 
             # Use scroll API for efficient pagination
             offset = None
@@ -236,6 +243,7 @@ class ChunkScanner:
 
         except Exception as e:
             logger.error(f"[Qdrant] Failed to scan: {e}", exc_info=True)
+            tqdm.write(f"[Qdrant] Error: {e}")
             raise
 
     async def scan_and_compute_difference(self):
@@ -243,6 +251,9 @@ class ChunkScanner:
         logger.info("=" * 80)
         logger.info("Starting parallel scan of Weaviate and Qdrant")
         logger.info("=" * 80)
+        print("\n" + "=" * 60)
+        print("Starting parallel scan of Weaviate and Qdrant")
+        print("=" * 60 + "\n")
 
         try:
             # Parallel scan
@@ -250,6 +261,9 @@ class ChunkScanner:
             weaviate_ids, qdrant_ids = await asyncio.gather(
                 self.scan_weaviate_ids(), self.scan_qdrant_ids()
             )
+
+            # Add newlines after progress bars
+            print("\n\n")
 
             # Compute set difference
             logger.info("Computing set difference...")
@@ -259,6 +273,13 @@ class ChunkScanner:
             logger.info(f"  Total in Weaviate: {len(weaviate_ids):,}")
             logger.info(f"  Total in Qdrant: {len(qdrant_ids):,}")
             logger.info(f"  Missing in Qdrant: {len(missing_ids):,}")
+
+            print("=" * 60)
+            print("Results:")
+            print(f"  Total in Weaviate: {len(weaviate_ids):,}")
+            print(f"  Total in Qdrant:   {len(qdrant_ids):,}")
+            print(f"  Missing in Qdrant: {len(missing_ids):,}")
+            print("=" * 60)
 
             # Write results to file
             output_data = {
@@ -278,8 +299,11 @@ class ChunkScanner:
             logger.info(f"Results written to: {OUTPUT_FILE}")
             logger.info("=" * 80)
 
+            print(f"\nResults written to: {OUTPUT_FILE}")
+
         except Exception as e:
             logger.error(f"Fatal error during scan: {e}", exc_info=True)
+            print(f"\nError: {e}")
             raise
 
 
