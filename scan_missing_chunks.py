@@ -80,7 +80,7 @@ class ChunkScanner:
         logger.info(f"Qdrant: {self.qdrant_url} / {self.qdrant_collection}")
 
     async def scan_weaviate_ids(self) -> Set[str]:
-        """Scan all chunk_ids from Weaviate collection.
+        """Scan all chunk_ids from Weaviate collection using cursor-based pagination.
 
         Returns:
             Set of chunk_id strings
@@ -88,7 +88,7 @@ class ChunkScanner:
         logger.info(f"[Weaviate] Starting scan of {self.weaviate_collection}...")
 
         chunk_ids = set()
-        offset = 0
+        cursor = None
         batch_size = 10000
 
         try:
@@ -110,9 +110,11 @@ class ChunkScanner:
                 # Retry logic for transient failures
                 for attempt in range(3):
                     try:
+                        # Use cursor-based pagination with 'after' parameter
+                        # This avoids the 100k offset limit
                         response = collection.query.fetch_objects(
                             limit=batch_size,
-                            offset=offset,
+                            after=cursor,  # Use cursor instead of offset
                             return_properties=["chunk_id"],
                         )
                         break
@@ -140,7 +142,8 @@ class ChunkScanner:
                 if len(response.objects) < batch_size:
                     break
 
-                offset += batch_size
+                # Set cursor to the last object's UUID for next iteration
+                cursor = response.objects[-1].uuid
 
             pbar.close()
             client.close()
