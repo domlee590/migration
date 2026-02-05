@@ -154,7 +154,7 @@ class ChunkScanner:
                     for obj in response.objects:
                         chunk_id = obj.properties.get("chunk_id")
                         if chunk_id:
-                            f.write(chunk_id + "\n")
+                            f.write(str(chunk_id) + "\n")
                             count += 1
 
                     # Update progress
