@@ -12,6 +12,7 @@ Usage:
 import os
 import sys
 import json
+import time
 import asyncio
 import logging
 from datetime import datetime
@@ -79,8 +80,8 @@ class ChunkScanner:
         logger.info(f"Weaviate: {self.weaviate_url} / {self.weaviate_collection}")
         logger.info(f"Qdrant: {self.qdrant_url} / {self.qdrant_collection}")
 
-    async def scan_weaviate_ids(self) -> Set[str]:
-        """Scan all chunk_ids from Weaviate collection using cursor-based pagination.
+    def _scan_weaviate_ids_sync(self) -> Set[str]:
+        """Synchronous Weaviate scan - runs in thread executor.
 
         Returns:
             Set of chunk_id strings
@@ -124,7 +125,7 @@ class ChunkScanner:
                         logger.warning(
                             f"[Weaviate] Retry {attempt + 1}/3 after error: {e}"
                         )
-                        await asyncio.sleep(2**attempt)
+                        time.sleep(2**attempt)
 
                 if not response.objects:
                     break
@@ -154,6 +155,16 @@ class ChunkScanner:
         except Exception as e:
             logger.error(f"[Weaviate] Failed to scan: {e}", exc_info=True)
             raise
+
+    async def scan_weaviate_ids(self) -> Set[str]:
+        """Scan all chunk_ids from Weaviate collection using cursor-based pagination.
+
+        Runs synchronous Weaviate client in thread executor to not block event loop.
+
+        Returns:
+            Set of chunk_id strings
+        """
+        return await asyncio.to_thread(self._scan_weaviate_ids_sync)
 
     async def scan_qdrant_ids(self) -> Set[str]:
         """Scan all point IDs from Qdrant collection.
