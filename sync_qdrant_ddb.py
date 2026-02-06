@@ -241,9 +241,10 @@ class ChunkSyncer:
                 data = json.loads(DDB_CHECKPOINT.read_text())
                 segs = set(data.get("completed_segments", []))
                 count = data.get("count", 0)
-                tqdm.write(
+                print(
                     f"[DDB] Resuming: {len(segs)}/{DDB_TOTAL_SEGMENTS} segments, "
-                    f"{count:,} chunks so far"
+                    f"{count:,} chunks so far",
+                    flush=True,
                 )
                 return segs, count
             except Exception as e:
@@ -323,19 +324,23 @@ class ChunkSyncer:
         remaining = [s for s in range(DDB_TOTAL_SEGMENTS) if s not in completed]
 
         if not remaining:
-            tqdm.write(f"[DDB] Already complete ({total_count:,} chunks)")
+            print(f"[DDB] Already complete ({total_count:,} chunks)", flush=True)
             return total_count
 
         total_remaining = len(remaining)
-        tqdm.write(
+        print(
             f"[DDB] Scanning {total_remaining} of {DDB_TOTAL_SEGMENTS} segments "
-            f"with {DDB_SCAN_WORKERS} workers..."
+            f"with {DDB_SCAN_WORKERS} workers...",
+            flush=True,
         )
         file_mode = "a" if completed else "w"
         file_lock = threading.Lock()
         cp_lock = threading.Lock()
         segs_since_save = 0
         segs_finished = [0]  # mutable counter for thread access
+        scan_start = time.monotonic()
+
+        print("[DDB] First segments dispatched, waiting for completions...", flush=True)
 
         with open(DDB_RAW_FILE, file_mode, buffering=8 * 1024 * 1024) as fh:
             with ThreadPoolExecutor(max_workers=DDB_SCAN_WORKERS) as pool:
@@ -358,11 +363,12 @@ class ChunkSyncer:
                             if segs_since_save >= 10:
                                 self._save_ddb_checkpoint(completed, total_count)
                                 segs_since_save = 0
-                            # Print progress on every segment completion
-                            tqdm.write(
-                                f"[DDB] Segment {seg} done: +{seg_count:,} chunks | "
-                                f"Progress: {segs_finished[0]}/{total_remaining} segments, "
-                                f"{total_count:,} total chunks"
+                            elapsed = int(time.monotonic() - scan_start)
+                            print(
+                                f"[DDB] Seg {seg:>3} done: +{seg_count:>12,} | "
+                                f"{segs_finished[0]:>3}/{total_remaining} segments | "
+                                f"{total_count:>15,} total | {elapsed}s elapsed",
+                                flush=True,
                             )
                     except Exception as e:
                         logger.error(f"[DDB] Segment {seg} failed: {e}")
@@ -373,6 +379,12 @@ class ChunkSyncer:
                             f"Re-run to resume."
                         ) from e
 
+        elapsed = int(time.monotonic() - scan_start)
+        print(
+            f"[DDB] All {total_remaining} segments complete: "
+            f"{total_count:,} chunks in {elapsed}s",
+            flush=True,
+        )
         DDB_CHECKPOINT.unlink(missing_ok=True)
         logger.info(f"[DDB] Complete: {total_count:,} chunks -> {DDB_RAW_FILE}")
         return total_count
