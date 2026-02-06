@@ -260,7 +260,7 @@ class ChunkSyncer:
         except Exception as e:
             logger.warning(f"[DDB] Checkpoint save failed: {e}")
 
-    def _scan_ddb_segment(self, segment, total_segments, file_lock, fh, pbar):
+    def _scan_ddb_segment(self, segment, total_segments, file_lock, fh):
         """Scan one DDB segment with per-page retry. Returns chunk count."""
         config = Config(
             region_name=self.ddb_region,
@@ -311,7 +311,6 @@ class ChunkSyncer:
                 with file_lock:
                     fh.writelines(lines)
 
-            pbar.update(len(items))
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
@@ -327,29 +326,23 @@ class ChunkSyncer:
             tqdm.write(f"[DDB] Already complete ({total_count:,} chunks)")
             return total_count
 
+        total_remaining = len(remaining)
         tqdm.write(
-            f"[DDB] Scanning {len(remaining)} of {DDB_TOTAL_SEGMENTS} segments "
+            f"[DDB] Scanning {total_remaining} of {DDB_TOTAL_SEGMENTS} segments "
             f"with {DDB_SCAN_WORKERS} workers..."
         )
         file_mode = "a" if completed else "w"
         file_lock = threading.Lock()
         cp_lock = threading.Lock()
         segs_since_save = 0
-
-        pbar = tqdm(
-            desc="[DDB] Scanning",
-            unit=" items",
-            position=0,
-            leave=True,
-            initial=total_count,
-        )
+        segs_finished = [0]  # mutable counter for thread access
 
         with open(DDB_RAW_FILE, file_mode, buffering=8 * 1024 * 1024) as fh:
             with ThreadPoolExecutor(max_workers=DDB_SCAN_WORKERS) as pool:
                 futures = {
                     pool.submit(
                         self._scan_ddb_segment,
-                        seg, DDB_TOTAL_SEGMENTS, file_lock, fh, pbar,
+                        seg, DDB_TOTAL_SEGMENTS, file_lock, fh,
                     ): seg
                     for seg in remaining
                 }
@@ -360,10 +353,17 @@ class ChunkSyncer:
                         with cp_lock:
                             total_count += seg_count
                             completed.add(seg)
+                            segs_finished[0] += 1
                             segs_since_save += 1
                             if segs_since_save >= 10:
                                 self._save_ddb_checkpoint(completed, total_count)
                                 segs_since_save = 0
+                            # Print progress on every segment completion
+                            tqdm.write(
+                                f"[DDB] Segment {seg} done: +{seg_count:,} chunks | "
+                                f"Progress: {segs_finished[0]}/{total_remaining} segments, "
+                                f"{total_count:,} total chunks"
+                            )
                     except Exception as e:
                         logger.error(f"[DDB] Segment {seg} failed: {e}")
                         self._save_ddb_checkpoint(completed, total_count)
@@ -373,7 +373,6 @@ class ChunkSyncer:
                             f"Re-run to resume."
                         ) from e
 
-        pbar.close()
         DDB_CHECKPOINT.unlink(missing_ok=True)
         logger.info(f"[DDB] Complete: {total_count:,} chunks -> {DDB_RAW_FILE}")
         return total_count
@@ -426,7 +425,7 @@ class ChunkSyncer:
             pbar = tqdm(
                 desc="[Qdrant] Scrolling",
                 unit=" points",
-                position=1,
+                position=0,
                 leave=True,
                 initial=count,
             )
