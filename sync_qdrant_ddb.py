@@ -271,7 +271,9 @@ class ChunkSyncer:
         table = boto3.resource("dynamodb", config=config).Table(self.ddb_table_name)
 
         count = 0
+        pages = 0
         last_key = None
+        seg_start = time.monotonic()
 
         while True:
             kwargs = {
@@ -290,6 +292,11 @@ class ChunkSyncer:
                     break
                 except Exception as e:
                     backoff = min(INITIAL_BACKOFF * (2 ** attempt), MAX_BACKOFF)
+                    print(
+                        f"[DDB] seg={segment} page={pages} attempt {attempt + 1} "
+                        f"RETRY: {type(e).__name__}: {e} (backoff {backoff}s)",
+                        flush=True,
+                    )
                     logger.warning(
                         f"[DDB] seg={segment} attempt {attempt + 1} failed: {e}"
                     )
@@ -300,6 +307,7 @@ class ChunkSyncer:
                         ) from e
 
             items = response.get("Items", [])
+            pages += 1
             lines = []
             for item in items:
                 chunk_id = str(item.get("id", ""))
@@ -311,6 +319,15 @@ class ChunkSyncer:
             if lines:
                 with file_lock:
                     fh.writelines(lines)
+
+            # Log first page and then every 100 pages
+            if pages == 1 or pages % 100 == 0:
+                elapsed = int(time.monotonic() - seg_start)
+                print(
+                    f"[DDB] seg={segment:>3} page={pages:>5} | "
+                    f"{count:>10,} items so far | {elapsed}s",
+                    flush=True,
+                )
 
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
